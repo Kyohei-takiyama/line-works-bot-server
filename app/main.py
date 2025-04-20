@@ -1,26 +1,29 @@
 # main.py
 import os
 import json
-import uuid
+from pathlib import Path
 import time
 import hmac
 import hashlib
 import base64
 import logging
+import asyncio
 
 import httpx
 import jwt
+import redis.asyncio as redis
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import (
     hashes,
 )  # JWT署名アルゴリズム検証用ではないが、一般的なハッシュ操作で使う可能性あり
 
-from fastapi import FastAPI, Request, Header, HTTPException, status
+from fastapi import FastAPI, Request, Header, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from .logger_config import setup_logger
 from .anthropic import call_anthropic_api
+from .salesforce_client import SalesforceClient
 
 
 # --- 定数 ---
@@ -41,6 +44,12 @@ SCOPE = os.getenv("SCOPE", DEFAULT_SCOPE)
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
+# Redis設定
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_PREFIX = "lw_bot:"  # Redisキーのプレフィックス
+
 # 環境変数チェック (重要なものがなければ起動時にエラー)
 required_env_vars = {
     "LW_API_ID": LW_API_ID,
@@ -59,13 +68,54 @@ if missing_vars:
 setup_logger()
 logger = logging.getLogger(__name__)
 
+# 環境変数のログ出力 (デバッグ用)
+logger.info(
+    f"Environment Variables: LW_API_ID={LW_API_ID}, LW_API_BOT_ID={LW_API_BOT_ID}, LW_API_SERVICE_ACCOUNT={LW_API_SERVICE_ACCOUNT}"
+)
+# ログ出力の確認 (デバッグ用)
+logger.info(
+    f"Anthropic API Key: {os.getenv('ANTHROPIC_API_KEY')}, Model: {os.getenv('ANTHROPIC_MODEL')}"
+)
+
 # --- FastAPI アプリケーションインスタンス ---
 app = FastAPI(title="LINE WORKS Bot Server (Inspired)", version="0.2.0")
 
-# --- グローバルデータ (アクセストークンキャッシュ) ---
-# 注意: これはシンプルな実装です。複数ワーカー環境では問題が生じる可能性があります。
-# より堅牢にするにはRedisなどの外部キャッシュや、FastAPIのDependency Injectionでの管理を検討してください。
-global_data = {"access_token": None, "expires_at": 0}
+# --- Redis接続 ---
+# Redisクライアントをグローバル変数として初期化
+redis_client = None
+# SalesforceClientインスタンスをグローバル変数として初期化
+sf_client = None
+
+
+@app.on_event("startup")
+async def startup_db_client():
+    global redis_client, sf_client
+    redis_client = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+        decode_responses=True,  # 文字列をUTF-8でデコード
+    )
+    logger.info(f"Redis connection established to {REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
+
+    # SalesforceClientの初期化
+    sf_client = SalesforceClient()
+    # RedisクライアントをSalesforceClientに設定
+    await sf_client.set_redis_client(redis_client)
+    logger.info("SalesforceClient initialized with Redis client")
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    global redis_client, sf_client
+    if redis_client:
+        await redis_client.close()
+        logger.info("Redis connection closed")
+
+    if sf_client:
+        await sf_client.close()
+        logger.info("SalesforceClient closed")
+
 
 # --- LINE WORKS API 連携ヘルパー関数 ---
 
@@ -96,23 +146,34 @@ async def validate_request(body_raw: bytes, signature: str, bot_secret: str) -> 
 
 async def get_access_token() -> str:
     """
-    Service Account 認証 (JWT) を使用してアクセストークンを取得またはキャッシュから返す。
+    Service Account 認証 (JWT) を使用してアクセストークンを取得またはRedisキャッシュから返す。
     (LINE WORKS 公式ドキュメント準拠)
     """
-    global global_data
+    global redis_client
     current_time = time.time()
 
+    # Redisからトークン情報を取得
+    token_key = f"{REDIS_PREFIX}access_token"
+    expires_key = f"{REDIS_PREFIX}expires_at"
+
+    access_token = await redis_client.get(token_key)
+    expires_at_str = await redis_client.get(expires_key)
+    expires_at = float(expires_at_str) if expires_at_str else 0
+
     # キャッシュが有効かチェック (有効期限の60秒前になったら更新)
-    if global_data["access_token"] and current_time < (global_data["expires_at"] - 60):
-        logger.info("Using cached access token.")
-        return global_data["access_token"]
+    if access_token and current_time < (expires_at - 60):
+        logger.info("Using cached access token from Redis.")
+        return access_token
 
     logger.info("Attempting to get new access token using Service Account JWT.")
 
     # Private Keyの読み込み
     try:
         logger.info(f"Reading private key from {LW_API_PRIVATEKEY_PATH}")
-        with open(LW_API_PRIVATEKEY_PATH, "rb") as key_file:
+        current_dir = Path.cwd()
+        key_path_obj = current_dir / LW_API_PRIVATEKEY_PATH
+        logger.info(f"Resolved private key path: {key_path_obj.resolve()}")
+        with open(key_path_obj.resolve(), "rb") as key_file:
             private_key_data = key_file.read()
             # PEM形式の秘密鍵をロード
             private_key = serialization.load_pem_private_key(
@@ -168,17 +229,26 @@ async def get_access_token() -> str:
                 logger.error(f"Access token not found in response: {token_data}")
                 return None
             logger.info(f"Access token obtained successfully. {token_data}")
-            # グローバルキャッシュを更新
-            global_data["access_token"] = token_data["access_token"]
+            # Redisキャッシュを更新
+            access_token = token_data["access_token"]
             # expires_in を取得し、安全に int に変換してから加算
             expires_in_value = token_data.get("expires_in", "3600")
+            expires_at = current_time + int(expires_in_value)
 
-            global_data["expires_at"] = current_time + int(expires_in_value)
+            # Redisに保存
+            token_key = f"{REDIS_PREFIX}access_token"
+            expires_key = f"{REDIS_PREFIX}expires_at"
+
+            await redis_client.set(token_key, access_token)
+            await redis_client.set(expires_key, str(expires_at))
+            # 有効期限よりも少し長めにRedisのキー自体の有効期限を設定
+            await redis_client.expire(token_key, int(expires_in_value) + 300)
+            await redis_client.expire(expires_key, int(expires_in_value) + 300)
 
             logger.info(
-                f"New access token obtained. Expires in {token_data.get('expires_in', 3600)} seconds."
+                f"New access token obtained and stored in Redis. Expires in {token_data.get('expires_in', 3600)} seconds."
             )
-            return global_data["access_token"]
+            return access_token
 
         except Exception as e:
             logger.exception(f"Unexpected error getting access token: {e}")
@@ -235,16 +305,18 @@ async def send_message_to_user(content: dict, user_id: str) -> httpx.Response:
                     logger.info(
                         "Access token might be expired or invalid. Forcing refresh."
                     )
-                    # キャッシュをクリアして次のループで再取得を試みる
-                    global global_data
-                    global_data["access_token"] = None
-                    global_data["expires_at"] = 0
+                    # Redisキャッシュをクリアして次のループで再取得を試みる
+                    token_key = f"{REDIS_PREFIX}access_token"
+                    expires_key = f"{REDIS_PREFIX}expires_at"
+                    await redis_client.delete(token_key)
+                    await redis_client.delete(expires_key)
+
                     if i < RETRY_COUNT_MAX:
                         wait_time = RETRY_WAIT_BASE * (2**i)
                         logger.info(
                             f"Retrying after {wait_time} seconds due to authorization error."
                         )
-                        await asyncio.sleep(wait_time)  # asyncio をインポート
+                        await asyncio.sleep(wait_time)
                         continue  # 次のリトライへ
                     else:
                         logger.error(

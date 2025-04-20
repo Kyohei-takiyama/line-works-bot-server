@@ -5,9 +5,10 @@ import logging
 import time
 import asyncio  # リトライ待機用
 import uuid
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import httpx
+import redis.asyncio as redis
 from dotenv import load_dotenv
 
 # 環境変数のロード (main.py と同じ .env を使う想定)
@@ -21,6 +22,12 @@ SF_CLIENT_SECRET = os.getenv("SF_CLIENT_SECRET")
 SF_BASE_URL = os.getenv("SF_BASE_URL")
 # APIバージョン (デフォルトまたは環境変数から)
 SF_API_VERSION = os.getenv("SF_API_VERSION", "v59.0")
+
+# Redis設定
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_PREFIX = "sf_agent:"  # Redisキーのプレフィックス
 
 # --- 環境変数チェック ---
 required_sf_vars = {
@@ -60,6 +67,10 @@ class SalesforceClient:
         token_cache_padding: int = 300,  # 5分
         max_retries: int = 2,  # API呼び出しリトライ回数
         retry_delay_base: float = 1.0,  # リトライ基本待機秒数
+        # Redisクライアント（オプション）
+        redis_client: Optional[redis.Redis] = None,
+        # セッションの有効期限（秒）
+        session_ttl: int = 3600,  # 1時間
     ):
         """
         SalesforceClientを初期化します。
@@ -103,6 +114,10 @@ class SalesforceClient:
         # 同時にトークン取得処理が走らないようにするためのロック
         self._token_lock = asyncio.Lock()
 
+        # Redisクライアント
+        self._redis_client = redis_client
+        self._session_ttl = session_ttl
+
     async def close(self):
         """
         内部で生成された httpx.AsyncClient を閉じる必要がある場合に呼び出します。
@@ -111,6 +126,14 @@ class SalesforceClient:
         if self._should_close_client and not self._client.is_closed:
             await self._client.aclose()
             logger.info("Internal httpx.AsyncClient closed.")
+
+    async def set_redis_client(self, redis_client: redis.Redis):
+        """
+        Redisクライアントを設定します。
+        アプリケーション起動時に呼び出すことを想定しています。
+        """
+        self._redis_client = redis_client
+        logger.info("Redis client set for SalesforceClient")
 
     async def _refresh_access_token(self) -> bool:
         """
@@ -523,12 +546,101 @@ class SalesforceClient:
             )
             return False
 
+    async def get_cached_session(self, agent_id: str) -> Optional[Tuple[str, str]]:
+        """
+        Redisからキャッシュされたセッション情報を取得します。
+
+        Args:
+            agent_id: Agentの18桁のID
+
+        Returns:
+            キャッシュが存在する場合は (session_key, session_id) のタプル、存在しない場合は None
+        """
+        if not self._redis_client:
+            logger.debug("Redis client not available, cannot get cached session")
+            return None
+
+        try:
+            # セッションキーとセッションIDを取得
+            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}"
+            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}"
+
+            session_key = await self._redis_client.get(session_key_redis_key)
+            session_id = await self._redis_client.get(session_id_redis_key)
+
+            if session_key and session_id:
+                logger.info(
+                    f"Found cached session for agent_id={agent_id}: session_key={session_key}, session_id={session_id}"
+                )
+                return session_key, session_id
+            else:
+                logger.debug(f"No cached session found for agent_id={agent_id}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting cached session from Redis: {e}")
+            return None
+
+    async def cache_session(self, agent_id: str, session_key: str, session_id: str):
+        """
+        セッション情報をRedisにキャッシュします。
+
+        Args:
+            agent_id: Agentの18桁のID
+            session_key: セッションキー
+            session_id: セッションID
+        """
+        if not self._redis_client:
+            logger.debug("Redis client not available, cannot cache session")
+            return
+
+        try:
+            # セッションキーとセッションIDを保存
+            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}"
+            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}"
+
+            await self._redis_client.set(session_key_redis_key, session_key)
+            await self._redis_client.set(session_id_redis_key, session_id)
+
+            # 有効期限を設定
+            await self._redis_client.expire(session_key_redis_key, self._session_ttl)
+            await self._redis_client.expire(session_id_redis_key, self._session_ttl)
+
+            logger.info(
+                f"Cached session for agent_id={agent_id}: session_key={session_key}, session_id={session_id}, ttl={self._session_ttl}s"
+            )
+        except Exception as e:
+            logger.error(f"Error caching session in Redis: {e}")
+
+    async def delete_cached_session(self, agent_id: str):
+        """
+        Redisからキャッシュされたセッション情報を削除します。
+
+        Args:
+            agent_id: Agentの18桁のID
+        """
+        if not self._redis_client:
+            logger.debug("Redis client not available, cannot delete cached session")
+            return
+
+        try:
+            # セッションキーとセッションIDを削除
+            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}"
+            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}"
+
+            await self._redis_client.delete(session_key_redis_key)
+            await self._redis_client.delete(session_id_redis_key)
+
+            logger.info(f"Deleted cached session for agent_id={agent_id}")
+        except Exception as e:
+            logger.error(f"Error deleting cached session from Redis: {e}")
+
     async def start_agent_session(
         self,
         agent_id: str,  # 18桁のAgent ID
         external_session_key: Optional[str] = None,
         bypass_user: bool = True,
         chunk_types: Optional[list[str]] = None,  # 例: ["Text"]
+        use_cached_session: bool = True,  # キャッシュされたセッションを使用するかどうか
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
         """
         Einstein Copilot Agentとの新しいセッションを開始します。
@@ -552,6 +664,23 @@ class SalesforceClient:
                     "Failed to get instance URL required for starting agent session."
                 )
                 return None
+
+        # キャッシュされたセッションを確認
+        cached_session = None
+        if use_cached_session and self._redis_client:
+            cached_session = await self.get_cached_session(agent_id)
+            if cached_session:
+                session_key, session_id = cached_session
+                logger.info(
+                    f"Using cached session for agent_id={agent_id}: session_id={session_id}"
+                )
+                # セッションIDとダミーレスポンスを返す
+                dummy_response = {
+                    "sessionId": session_id,
+                    "fromCache": True,
+                    "message": "Using cached session",
+                }
+                return session_id, dummy_response
 
         # URLを構築
         session_url = f"{self.copilot_api_base_url}/agents/{agent_id}/sessions"
@@ -584,6 +713,9 @@ class SalesforceClient:
         if response and response.status_code == 200:  # 成功は 200 OK
             try:
                 response_json = response.json()
+                logger.info(
+                    f"Successfully started Copilot Agent session for agentId='{agent_id}'."
+                )
                 session_id = response_json.get("sessionId")
                 if not session_id:
                     logger.error(
@@ -594,6 +726,11 @@ class SalesforceClient:
                     f"Successfully started Copilot Agent session: sessionId='{session_id}'"
                 )
                 # logger.debug(f"Start session response: {response_json}")
+
+                # セッション情報をRedisにキャッシュ
+                if self._redis_client:
+                    await self.cache_session(agent_id, session_key, session_id)
+
                 return session_id, response_json  # セッションIDとレスポンス全体を返す
             except Exception as e:
                 logger.error(
@@ -674,7 +811,9 @@ class SalesforceClient:
             )
             return None
 
-    async def end_agent_session(self, session_id: str) -> bool:
+    async def end_agent_session(
+        self, session_id: str, agent_id: Optional[str] = None
+    ) -> bool:
         """
         Einstein Copilot Agentセッションを終了します。
 
@@ -696,6 +835,11 @@ class SalesforceClient:
             logger.info(
                 f"Successfully ended Copilot Agent session: sessionId='{session_id}'. Status: {response.status_code}"
             )
+
+            # セッション情報をRedisから削除
+            if self._redis_client and agent_id:
+                await self.delete_cached_session(agent_id)
+
             return True
         elif response:
             logger.error(

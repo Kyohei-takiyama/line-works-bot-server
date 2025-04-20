@@ -2,3 +2,12 @@
 private.key
 
 venv
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Docker関連
+.dockerignore
+.docker/
+docker-compose.override.yml
