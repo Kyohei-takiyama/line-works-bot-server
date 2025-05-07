@@ -24,6 +24,10 @@ from dotenv import load_dotenv
 from .logger_config import setup_logger
 from .anthropic import call_anthropic_api
 from .salesforce_client import SalesforceClient
+from .anthropic import (
+    summarize_message,
+    generate_response_from_agent_reply,
+)
 
 
 # --- 定数 ---
@@ -449,16 +453,89 @@ async def callback(request: Request, x_works_signature: str = Header(None)):
                 received_text = content.get("text")
                 logger.info(f"Received text message from {user_id}: '{received_text}'")
 
-                claude_reply_text = await call_anthropic_api(received_text)
-                if claude_reply_text:
-                    reply_to_send = claude_reply_text
-                else:
-                    logger.error(
-                        f"Failed to get a valid response from Anthropic for user {user_id}."
-                    )
-                    reply_to_send = "申し訳ありません、現在応答を生成できません。しばらくしてからもう一度お試しください。"
+                # 1. ユーザーからのメッセージを要約
+                summarized_text = await summarize_message(received_text)
+                logger.info(f"Summarized message: '{summarized_text}'")
 
-                # オウム返しの応答メッセージを作成
+                # 2. Salesforce Agent APIを呼び出す
+                # Salesforce Agent IDを設定（環境変数から取得するか、固定値を使用）
+                agent_id = os.getenv(
+                    "SF_AGENT_ID", "0Xx0000000000000000"
+                )  # デフォルト値は適宜変更
+
+                try:
+                    # セッションを開始または既存のセッションを取得
+                    session_result = await sf_client.start_agent_session(
+                        agent_id=agent_id,
+                        use_cached_session=True,  # キャッシュされたセッションを使用
+                    )
+
+                    if not session_result:
+                        logger.error(
+                            f"Failed to start or get Agent session for user {user_id}"
+                        )
+                        reply_to_send = "申し訳ありません、現在応答を生成できません。しばらくしてからもう一度お試しください。"
+                    else:
+                        session_id, session_response = session_result
+
+                        # セッションが新規作成されたかキャッシュから取得されたかを確認
+                        is_from_cache = session_response.get("fromCache", False)
+                        sequence_id = 1  # 新規セッションの場合は1から開始
+
+                        if is_from_cache:
+                            # キャッシュされたセッションの場合、シーケンスIDを増やす必要がある
+                            # 実際のアプリケーションでは、前回のシーケンスIDをRedisに保存するなどの対応が必要
+                            # ここでは簡易的に2を使用
+                            sequence_id = 2
+
+                        # 要約したメッセージをAgentに送信
+                        agent_response = await sf_client.send_sync_message_to_agent(
+                            session_id=session_id,
+                            sequence_id=sequence_id,
+                            text=summarized_text,
+                        )
+
+                        if not agent_response:
+                            logger.error(
+                                f"Failed to get response from Agent for user {user_id}"
+                            )
+                            reply_to_send = "申し訳ありません、現在応答を生成できません。しばらくしてからもう一度お試しください。"
+                        else:
+                            # 3. Agent APIの返信文を受け取る
+                            agent_reply = ""
+
+                            # レスポンスからメッセージテキストを抽出
+                            if (
+                                "message" in agent_response
+                                and "text" in agent_response["message"]
+                            ):
+                                agent_reply = agent_response["message"]["text"]
+                            elif (
+                                "messages" in agent_response
+                                and agent_response["messages"]
+                            ):
+                                for msg in agent_response["messages"]:
+                                    if "text" in msg:
+                                        agent_reply += msg["text"] + "\n"
+
+                            logger.info(
+                                f"Received reply from Agent: '{agent_reply[:100]}...'"
+                            )
+
+                            # 4. Agent APIの返信を使用してメッセージを生成
+                            reply_to_send = await generate_response_from_agent_reply(
+                                agent_reply, received_text
+                            )
+                except Exception as e:
+                    logger.exception(f"Error processing Agent API request: {e}")
+                    # エラーが発生した場合は、通常のAnthropicレスポンスにフォールバック
+                    claude_reply_text = await call_anthropic_api(received_text)
+                    if claude_reply_text:
+                        reply_to_send = claude_reply_text
+                    else:
+                        reply_to_send = "申し訳ありません、現在応答を生成できません。しばらくしてからもう一度お試しください。"
+
+                # 応答メッセージを作成
                 res_content = {
                     "content": {
                         "type": "text",
@@ -508,7 +585,4 @@ async def callback(request: Request, x_works_signature: str = Header(None)):
 @app.get("/")
 async def root():
     logger.info("Health check endpoint accessed.")
-    logger.info(
-        f"Environment Variables: LW_API_ID={LW_API_ID}, LW_API_BOT_ID={LW_API_BOT_ID} API_KEY={os.getenv('ANTHROPIC_API_KEY')}"
-    )
     return {"message": "LINE WORKS Bot Server is running!"}
