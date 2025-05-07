@@ -549,57 +549,66 @@ class SalesforceClient:
             )
             return False
 
-    async def get_cached_session(self, agent_id: str) -> Optional[Tuple[str, str]]:
+    async def get_cached_session(
+        self, agent_id: str, user_id: str
+    ) -> Optional[Tuple[str, str]]:
         """
         Redisからキャッシュされたセッション情報を取得します。
 
         Args:
             agent_id: Agentの18桁のID
+            user_id: ユーザーID
 
         Returns:
             キャッシュが存在する場合は (session_key, session_id) のタプル、存在しない場合は None
         """
         if not self._redis_client:
-            logger.debug("Redis client not available, cannot get cached session")
+            logger.warning("Redis client not available, cannot get cached session")
             return None
 
         try:
-            # セッションキーとセッションIDを取得
-            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}"
-            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}"
+            # セッションキーとセッションIDを取得（ユーザーIDを含む）
+            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}:{user_id}"
+            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}:{user_id}"
 
             session_key = await self._redis_client.get(session_key_redis_key)
             session_id = await self._redis_client.get(session_id_redis_key)
 
             if session_key and session_id:
                 logger.info(
-                    f"Found cached session for agent_id={agent_id}: session_key={session_key}, session_id={session_id}"
+                    f"Found cached session for agent_id={agent_id}, user_id={user_id}: session_key={session_key}, session_id={session_id}"
                 )
                 return session_key, session_id
             else:
-                logger.debug(f"No cached session found for agent_id={agent_id}")
+                logger.debug(
+                    f"No cached session found for agent_id={agent_id}, user_id={user_id}"
+                )
                 return None
         except Exception as e:
-            logger.error(f"Error getting cached session from Redis: {e}")
+            logger.warning(f"Error getting cached session from Redis: {e}")
+            # Redisエラーの場合はキャッシュスキップとして処理し、セッション生成ロジックにフォールバック
             return None
 
-    async def cache_session(self, agent_id: str, session_key: str, session_id: str):
+    async def cache_session(
+        self, agent_id: str, user_id: str, session_key: str, session_id: str
+    ):
         """
         セッション情報をRedisにキャッシュします。
 
         Args:
             agent_id: Agentの18桁のID
+            user_id: ユーザーID
             session_key: セッションキー
             session_id: セッションID
         """
         if not self._redis_client:
-            logger.debug("Redis client not available, cannot cache session")
+            logger.warning("Redis client not available, cannot cache session")
             return
 
         try:
-            # セッションキーとセッションIDを保存
-            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}"
-            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}"
+            # セッションキーとセッションIDを保存（ユーザーIDを含む）
+            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}:{user_id}"
+            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}:{user_id}"
 
             await self._redis_client.set(session_key_redis_key, session_key)
             await self._redis_client.set(session_id_redis_key, session_id)
@@ -608,38 +617,109 @@ class SalesforceClient:
             await self._redis_client.expire(session_key_redis_key, self._session_ttl)
             await self._redis_client.expire(session_id_redis_key, self._session_ttl)
 
+            # 初期シーケンスIDを設定
+            seq_redis_key = f"{REDIS_PREFIX}seq:{session_id}"
+            await self._redis_client.set(seq_redis_key, "1")
+            await self._redis_client.expire(seq_redis_key, self._session_ttl)
+
             logger.info(
-                f"Cached session for agent_id={agent_id}: session_key={session_key}, session_id={session_id}, ttl={self._session_ttl}s"
+                f"Cached session for agent_id={agent_id}, user_id={user_id}: session_key={session_key}, session_id={session_id}, ttl={self._session_ttl}s"
             )
         except Exception as e:
-            logger.error(f"Error caching session in Redis: {e}")
+            logger.warning(f"Error caching session in Redis: {e}")
 
-    async def delete_cached_session(self, agent_id: str):
+    async def delete_cached_session(
+        self, agent_id: str, user_id: str, session_id: Optional[str] = None
+    ):
         """
         Redisからキャッシュされたセッション情報を削除します。
 
         Args:
             agent_id: Agentの18桁のID
+            user_id: ユーザーID
+            session_id: セッションID（オプション）
         """
         if not self._redis_client:
-            logger.debug("Redis client not available, cannot delete cached session")
+            logger.warning("Redis client not available, cannot delete cached session")
             return
 
         try:
-            # セッションキーとセッションIDを削除
-            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}"
-            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}"
+            # セッションキーとセッションIDを削除（ユーザーIDを含む）
+            session_key_redis_key = f"{REDIS_PREFIX}session_key:{agent_id}:{user_id}"
+            session_id_redis_key = f"{REDIS_PREFIX}session_id:{agent_id}:{user_id}"
+
+            # セッションIDが指定されている場合は、シーケンスIDも削除
+            if session_id:
+                seq_redis_key = f"{REDIS_PREFIX}seq:{session_id}"
+                await self._redis_client.delete(seq_redis_key)
+                logger.debug(f"Deleted sequence ID for session_id={session_id}")
 
             await self._redis_client.delete(session_key_redis_key)
             await self._redis_client.delete(session_id_redis_key)
 
-            logger.info(f"Deleted cached session for agent_id={agent_id}")
+            logger.info(
+                f"Deleted cached session for agent_id={agent_id}, user_id={user_id}"
+            )
         except Exception as e:
-            logger.error(f"Error deleting cached session from Redis: {e}")
+            logger.warning(f"Error deleting cached session from Redis: {e}")
+
+    async def get_sequence_id(self, session_id: str) -> int:
+        """
+        セッションの現在のシーケンスIDを取得します。
+        存在しない場合は1を返します。
+
+        Args:
+            session_id: セッションID
+
+        Returns:
+            現在のシーケンスID
+        """
+        if not self._redis_client:
+            logger.warning("Redis client not available, cannot get sequence ID")
+            return 1
+
+        try:
+            seq_redis_key = f"{REDIS_PREFIX}seq:{session_id}"
+            seq_id_str = await self._redis_client.get(seq_redis_key)
+
+            if seq_id_str:
+                return int(seq_id_str)
+            else:
+                logger.debug(
+                    f"No sequence ID found for session_id={session_id}, using default 1"
+                )
+                return 1
+        except Exception as e:
+            logger.warning(f"Error getting sequence ID from Redis: {e}")
+            return 1
+
+    async def update_sequence_id(self, session_id: str, sequence_id: int):
+        """
+        セッションのシーケンスIDを更新します。
+
+        Args:
+            session_id: セッションID
+            sequence_id: 新しいシーケンスID
+        """
+        if not self._redis_client:
+            logger.warning("Redis client not available, cannot update sequence ID")
+            return
+
+        try:
+            seq_redis_key = f"{REDIS_PREFIX}seq:{session_id}"
+            await self._redis_client.set(seq_redis_key, str(sequence_id))
+            # セッションと同じTTLを設定
+            await self._redis_client.expire(seq_redis_key, self._session_ttl)
+            logger.debug(
+                f"Updated sequence ID for session_id={session_id} to {sequence_id}"
+            )
+        except Exception as e:
+            logger.warning(f"Error updating sequence ID in Redis: {e}")
 
     async def start_agent_session(
         self,
         agent_id: str,  # 18桁のAgent ID
+        user_id: str,  # ユーザーID
         external_session_key: Optional[str] = None,
         bypass_user: bool = True,
         chunk_types: Optional[list[str]] = None,  # 例: ["Text"]
@@ -671,11 +751,11 @@ class SalesforceClient:
         # キャッシュされたセッションを確認
         cached_session = None
         if use_cached_session and self._redis_client:
-            cached_session = await self.get_cached_session(agent_id)
+            cached_session = await self.get_cached_session(agent_id, user_id)
             if cached_session:
                 session_key, session_id = cached_session
                 logger.info(
-                    f"Using cached session for agent_id={agent_id}: session_id={session_id}"
+                    f"Using cached session for agent_id={agent_id}, user_id={user_id}: session_id={session_id}"
                 )
                 # セッションIDとダミーレスポンスを返す
                 dummy_response = {
@@ -694,11 +774,8 @@ class SalesforceClient:
         )
         request_body: Dict[str, Any] = {
             "externalSessionKey": session_key,
-            "instanceConfig": {
-                # instance_url は "https://" プレフィックスを含む場合があるので、必要なら除去する
-                # ドキュメント例では "https://" を含んでいるので、そのまま使う
-                "endpoint": self._instance_url
-            },
+            "instanceConfig": {"endpoint": self._instance_url},
+            "featureSupport": "Sync",
             "bypassUser": bypass_user,
         }
         if chunk_types:
@@ -732,7 +809,7 @@ class SalesforceClient:
 
                 # セッション情報をRedisにキャッシュ
                 if self._redis_client:
-                    await self.cache_session(agent_id, session_key, session_id)
+                    await self.cache_session(agent_id, user_id, session_key, session_id)
 
                 return session_id, response_json  # セッションIDとレスポンス全体を返す
             except Exception as e:
@@ -752,7 +829,7 @@ class SalesforceClient:
             return None
 
     async def send_sync_message_to_agent(
-        self, session_id: str, sequence_id: int, text: str
+        self, session_id: str, text: str, sequence_id: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
         """
         既存のAgentセッションに同期メッセージを送信します。
@@ -767,6 +844,16 @@ class SalesforceClient:
         """
         # URLを構築
         message_url = f"{self.copilot_api_base_url}/sessions/{session_id}/messages"
+
+        # シーケンスIDが指定されていない場合は、Redisから取得してインクリメント
+        if sequence_id is None:
+            sequence_id = await self.get_sequence_id(session_id)
+            # 次回用にインクリメント
+            next_sequence_id = sequence_id + 1
+            await self.update_sequence_id(session_id, next_sequence_id)
+            logger.debug(
+                f"Using sequence_id={sequence_id} for session_id={session_id}, next will be {next_sequence_id}"
+            )
 
         # リクエストボディを構築
         request_body = {
@@ -815,7 +902,10 @@ class SalesforceClient:
             return None
 
     async def end_agent_session(
-        self, session_id: str, agent_id: Optional[str] = None
+        self,
+        session_id: str,
+        agent_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
         """
         Einstein Copilot Agentセッションを終了します。
@@ -840,8 +930,8 @@ class SalesforceClient:
             )
 
             # セッション情報をRedisから削除
-            if self._redis_client and agent_id:
-                await self.delete_cached_session(agent_id)
+            if self._redis_client and agent_id and user_id:
+                await self.delete_cached_session(agent_id, user_id, session_id)
 
             return True
         elif response:

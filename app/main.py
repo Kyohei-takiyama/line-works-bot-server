@@ -459,14 +459,13 @@ async def callback(request: Request, x_works_signature: str = Header(None)):
 
                 # 2. Salesforce Agent APIを呼び出す
                 # Salesforce Agent IDを設定（環境変数から取得するか、固定値を使用）
-                agent_id = os.getenv(
-                    "SF_AGENT_ID", "0Xx0000000000000000"
-                )  # デフォルト値は適宜変更
+                agent_id = os.getenv("SF_AGENT_ID", "0Xx0000000000000000")
 
                 try:
                     # セッションを開始または既存のセッションを取得
                     session_result = await sf_client.start_agent_session(
                         agent_id=agent_id,
+                        user_id=user_id,  # ユーザーIDを追加
                         use_cached_session=True,  # キャッシュされたセッションを使用
                     )
 
@@ -478,21 +477,15 @@ async def callback(request: Request, x_works_signature: str = Header(None)):
                     else:
                         session_id, session_response = session_result
 
-                        # セッションが新規作成されたかキャッシュから取得されたかを確認
-                        is_from_cache = session_response.get("fromCache", False)
-                        sequence_id = 1  # 新規セッションの場合は1から開始
-
-                        if is_from_cache:
-                            # キャッシュされたセッションの場合、シーケンスIDを増やす必要がある
-                            # 実際のアプリケーションでは、前回のシーケンスIDをRedisに保存するなどの対応が必要
-                            # ここでは簡易的に2を使用
-                            sequence_id = 2
-
                         # 要約したメッセージをAgentに送信
+                        # シーケンスIDはsend_sync_message_to_agentメソッド内で自動的に管理される
                         agent_response = await sf_client.send_sync_message_to_agent(
                             session_id=session_id,
-                            sequence_id=sequence_id,
                             text=summarized_text,
+                        )
+
+                        logger.info(
+                            f"Agent response: {json.dumps(agent_response, indent=2)}"
                         )
 
                         if not agent_response:
@@ -555,6 +548,16 @@ async def callback(request: Request, x_works_signature: str = Header(None)):
                     logger.error(
                         f"Message send attempt failed definitively for user {user_id}."
                     )
+
+                    # 会話が終了したら、セッションを終了する
+                    # 実際のアプリケーションでは、会話の終了条件を適切に判断する必要がある
+                    # ここでは例として、特定のキーワードがあれば終了するなどの条件を設定できる
+                    if "終了" in received_text or "さようなら" in received_text:
+                        logger.info(f"Ending session for user {user_id}")
+                        await sf_client.end_agent_session(
+                            session_id=session_id, agent_id=agent_id, user_id=user_id
+                        )
+                        logger.info(f"Session ended for user {user_id}")
 
             else:
                 logger.info(
