@@ -48,6 +48,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ```bash
 docker-compose up -d
+
+ngrok http http://localhost:8000
 ```
 
 サーバーは http://localhost:8000 でアクセスできます。

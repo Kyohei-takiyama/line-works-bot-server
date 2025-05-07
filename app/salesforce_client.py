@@ -99,6 +99,9 @@ class SalesforceClient:
         self.max_retries = max_retries
         self.retry_delay_base = retry_delay_base
 
+        # Salesforce Einstein Copilot Agent API のベースURL
+        self.copilot_api_base_url = "https://api.salesforce.com/einstein/ai-agent/v1"
+
         # httpx.AsyncClient を初期化または外部から受け取る
         self._client = (
             client if client else httpx.AsyncClient(timeout=30.0)

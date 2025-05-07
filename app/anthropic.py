@@ -42,6 +42,127 @@ else:
     logger.warning("ANTHROPIC_API_KEY is not set. Anthropic client not initialized.")
 
 
+async def summarize_message(user_message: str) -> str:
+    """
+    ユーザーからのメッセージを要約する
+
+    Args:
+        user_message: 要約するユーザーメッセージ
+
+    Returns:
+        要約されたメッセージ
+    """
+    if not anthropic_client:  # クライアントが初期化されていない場合
+        logger.error("Anthropic client is not available.")
+        return user_message  # 要約できない場合は元のメッセージを返す
+
+    try:
+        logger.info(
+            f"Summarizing message using Anthropic API: '{user_message[:50]}...'"
+        )
+
+        # 要約用のシステムプロンプト
+        summary_system_prompt = """
+        あなたはユーザーのメッセージを簡潔に要約するアシスタントです。
+        ユーザーからのメッセージを、重要なポイントを保持したまま、簡潔に要約してください。
+        要約は100文字以内に収めてください。
+        """
+
+        # ライブラリを使ってメッセージを作成・送信
+        message = await anthropic_client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=150,
+            system=summary_system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+
+        # message オブジェクトから応答テキストを取得
+        if message.content and isinstance(message.content, list):
+            first_content_block = message.content[0]
+            if (
+                hasattr(first_content_block, "type")
+                and first_content_block.type == "text"
+            ):
+                summary = first_content_block.text
+                if summary:
+                    logger.info(f"Successfully summarized message: '{summary}'")
+                    return summary.strip()
+
+        logger.warning("Failed to summarize message, returning original message")
+        return user_message  # 要約に失敗した場合は元のメッセージを返す
+
+    except Exception as e:
+        logger.exception(f"Error summarizing message: {e}")
+        return user_message  # エラーが発生した場合は元のメッセージを返す
+
+
+async def generate_response_from_agent_reply(
+    agent_reply: str, user_message: str
+) -> str:
+    """
+    Salesforce Agent APIの返信を使用して、ユーザー向けの応答を生成する
+
+    Args:
+        agent_reply: Salesforce Agent APIからの返信
+        user_message: 元のユーザーメッセージ
+
+    Returns:
+        生成された応答
+    """
+    if not anthropic_client:  # クライアントが初期化されていない場合
+        logger.error("Anthropic client is not available.")
+        return "申し訳ありません、現在AIによる応答生成機能を利用できません。設定を確認中です。"
+
+    try:
+        logger.info(f"Generating response from agent reply using Anthropic API")
+
+        # 応答生成用のシステムプロンプト
+        response_system_prompt = """
+        あなたは、求職者のキャリア相談に乗り、適切な求人を紹介するキャリアアドバイザーBotです。
+        以下の点を考慮して、丁寧かつ親身に対応してください。
+
+        *   **あなたの役割:** 求職者の希望やスキル、経験などをヒアリングし、最適な求人情報を提供することです。求人紹介に関連しない雑談にも応じますが、最終的には求人の話につなげるように意識してください。
+        *   **応答スタイル:** 親しみやすく、プロフェッショナルなトーンで応答してください。専門用語は避け、分かりやすい言葉で説明してください。感嘆符や絵文字を使って、フレンドリーな雰囲気を出してください。
+
+        ユーザーからのメッセージと、Salesforceのエージェントからの返信情報をもとに、最適な応答を生成してください。
+        エージェントからの返信情報を参考にしつつ、自然な会話になるように応答を作成してください。
+        """
+
+        # ライブラリを使ってメッセージを作成・送信
+        message = await anthropic_client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=1024,
+            system=response_system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"ユーザーメッセージ: {user_message}\n\nエージェント返信: {agent_reply}",
+                }
+            ],
+        )
+
+        # message オブジェクトから応答テキストを取得
+        if message.content and isinstance(message.content, list):
+            first_content_block = message.content[0]
+            if (
+                hasattr(first_content_block, "type")
+                and first_content_block.type == "text"
+            ):
+                response = first_content_block.text
+                if response:
+                    logger.info(
+                        f"Successfully generated response from agent reply: '{response[:100]}...'"
+                    )
+                    return response.strip()
+
+        logger.warning("Failed to generate response from agent reply")
+        return "申し訳ありません、現在応答を生成できません。しばらくしてからもう一度お試しください。"
+
+    except Exception as e:
+        logger.exception(f"Error generating response from agent reply: {e}")
+        return "申し訳ありません、現在応答を生成できません。しばらくしてからもう一度お試しください。"
+
+
 async def call_anthropic_api(user_message: str) -> str:
     """Anthropic APIを呼び出し、応答テキストを取得する (anthropic ライブラリ使用)"""
     if not anthropic_client:  # クライアントが初期化されていない場合
