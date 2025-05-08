@@ -65,6 +65,10 @@ async def summarize_message(user_message: str) -> str:
         summary_system_prompt = """
         あなたはユーザーのメッセージを簡潔に要約するアシスタントです。
         ユーザーからのメッセージを、重要なポイントを保持したまま、簡潔に要約してください。
+        *   **業種の扱い（重要）**
+            - ユーザーが次のいずれかの業種のどれを求めているかを判断してください。「Chemicals,Communications,Construction,Consulting,Education,Electronics,Energy,Engineering,Entertainment,Environmental,Finance,Food,Government,Healthcare,Hospitality,Insurance,Machinery,Manufacturing,Media,Not,Other,Recreation,Retail,Shipping,Technology,Telecommunications,Transportation,Utilities,IT」
+            - 選択した「業種」は必ず要約文に含めてください。
+            - 例：「ユーザーは業種が『IT』の求人を探しています。」のように言及してください。
         要約は100文字以内に収めてください。
         """
 
@@ -123,6 +127,10 @@ async def generate_response_from_agent_reply(
 
         *   **あなたの役割:** 求職者の希望やスキル、経験などをヒアリングし、最適な求人情報を提供することです。求人紹介に関連しない雑談にも応じますが、最終的には求人の話につなげるように意識してください。
         *   **応答スタイル:** 親しみやすく、プロフェッショナルなトーンで応答してください。専門用語は避け、分かりやすい言葉で説明してください。感嘆符や絵文字を使って、フレンドリーな雰囲気を出してください。
+        *   **会社名の扱い（重要）**
+            - エージェントから「株式会社ITカンパニー」など具体的な会社名が返ってきた場合、必ずあなたの返信文中にその会社名を含めてください。
+            - 例：「現在『株式会社ITカンパニー』が見つかっていますので、こちらのほかにも…」のように言及してください。
+            - エージェントからの返信に会社名が含まれていない場合は、あなたの判断で会社名を入れないでください。
 
         ユーザーからのメッセージと、Salesforceのエージェントからの返信情報をもとに、最適な応答を生成してください。
         エージェントからの返信情報を参考にしつつ、自然な会話になるように応答を作成してください。

@@ -877,7 +877,7 @@ class SalesforceClient:
             try:
                 response_json = response.json()
                 logger.info(
-                    f"Successfully received sync response from Copilot Agent session='{session_id}'."
+                    f"Successfully received sync response from Copilot Agent session='{session_id}'. Response: {response_json}"
                 )
                 # logger.debug(f"Sync message response: {response_json}")
                 return response_json
