@@ -11,3 +11,21 @@ __pycache__/
 .dockerignore
 .docker/
 docker-compose.override.yml
+
+# Terraform関連
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+.terraformrc
+terraform.rc
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+terraform-line-works-bot/lambda_authorizer.zip
+terraform-line-works-bot/modules/api_gateway_webhook/lambda_authorizer.zip

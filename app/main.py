@@ -48,6 +48,9 @@ SCOPE = os.getenv("SCOPE", DEFAULT_SCOPE)
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
+# 署名検証モード: strict（厳格）, warn（警告のみ）, skip（スキップ）
+SIGNATURE_VERIFICATION_MODE = os.getenv("SIGNATURE_VERIFICATION_MODE", "strict").lower()
+
 # Redis設定
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -126,6 +129,13 @@ async def shutdown_db_client():
 
 async def validate_request(body_raw: bytes, signature: str, bot_secret: str) -> bool:
     """Webhookリクエストの署名を検証する"""
+    # 署名検証モードがskipの場合は常にTrueを返す（ローカル開発環境用）
+    if SIGNATURE_VERIFICATION_MODE == "skip":
+        logger.info(
+            "Signature validation skipped due to SIGNATURE_VERIFICATION_MODE=skip"
+        )
+        return True
+
     if signature is None:
         logger.warning("Missing X-Works-Signature header.")
         return False
@@ -409,14 +419,25 @@ async def callback(request: Request, x_works_signature: str = Header(None)):
     # 署名検証
     if not await validate_request(body_raw, x_works_signature, LW_API_BOT_SECRET):
         logger.warning("Invalid signature.")
-        # LINE WORKSは401を返すと再送を試みる場合があるので注意。ログに残して200を返すか、401を返すか選択。
-        # ここでは警告ログのみとし、不正リクエストとして処理はしない。
-        # 不正リクエストを完全に拒否する場合は HTTPException(status_code=401...) を raise する。
-        # raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={"message": "Signature validation failed, but acknowledged."},
-        )
+
+        # 署名検証モードに応じた処理
+        if SIGNATURE_VERIFICATION_MODE == "strict":
+            # 厳格モード: 署名検証に失敗した場合はリクエストを拒否（本番環境向け）
+            logger.error(
+                "Rejecting request due to invalid signature (SIGNATURE_VERIFICATION_MODE=strict)"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature"
+            )
+        else:
+            # 警告モード: 署名検証に失敗した場合は警告ログを出力するが処理は続行
+            logger.warning(
+                "Proceeding despite invalid signature (SIGNATURE_VERIFICATION_MODE=warn)"
+            )
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={"message": "Signature validation failed, but acknowledged."},
+            )
 
     logger.info("Signature validated.")
 

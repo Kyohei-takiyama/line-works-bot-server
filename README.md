@@ -105,6 +105,12 @@ LW_API_PRIVATEKEY_PATH=private.key
 CLIENT_ID=your_client_id
 CLIENT_SECRET=your_client_secret
 
+# 署名検証モード設定
+# strict: 署名検証に失敗した場合はリクエストを拒否（本番環境向け、デフォルト）
+# warn: 署名検証に失敗した場合は警告ログを出力するが処理は続行（開発/テスト環境向け）
+# skip: 署名検証を完全にスキップ（ローカル開発環境向け）
+SIGNATURE_VERIFICATION_MODE=strict
+
 # Anthropic API設定
 ANTHROPIC_API_KEY=your_anthropic_api_key
 ANTHROPIC_MODEL=claude-3-5-sonnet-20240620
@@ -219,3 +225,4 @@ docker-compose up -d
 - `private.key`ファイルは機密情報です。適切に保護し、リポジトリにコミットしないでください。
 - 環境変数ファイル(`.env`)も機密情報を含むため、リポジトリにコミットしないでください。
 - 本番環境では、適切なネットワークセキュリティ対策を講じてください。
+- 本番環境では`SIGNATURE_VERIFICATION_MODE`を`strict`に設定し、署名検証を厳格に行ってください。`warn`や`skip`モードは開発環境でのみ使用してください。
