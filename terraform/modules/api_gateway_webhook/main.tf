@@ -26,7 +26,7 @@ resource "aws_api_gateway_rest_api" "this" {
 resource "aws_api_gateway_resource" "webhook" {
   rest_api_id = aws_api_gateway_rest_api.this.id
   parent_id   = aws_api_gateway_rest_api.this.root_resource_id
-  path_part   = var.webhook_path
+  path_part   = replace(var.webhook_path, "/", "")
 }
 
 # API Gateway メソッド（POST）
@@ -154,19 +154,19 @@ resource "aws_iam_role_policy_attachment" "authorizer" {
 
 # VPCリンク
 resource "aws_api_gateway_vpc_link" "this" {
-  name        = "${local.name_prefix}-vpc-link"
+  name        = "${local.name_prefix}-vpc-link-new"
   description = "VPC Link for ${local.name_prefix}"
-  target_arns = [var.alb_listener_arn]
+  target_arns = [var.alb_arn]
 
   tags = merge(
     {
-      Name = "${local.name_prefix}-vpc-link"
+      Name = "${local.name_prefix}-vpc-link-new"
     },
     var.tags
   )
 }
 
-# API Gateway 統合（ALBへのプロキシ）
+# API Gateway 統合（NLBへのプロキシ）
 resource "aws_api_gateway_integration" "webhook_post" {
   rest_api_id             = aws_api_gateway_rest_api.this.id
   resource_id             = aws_api_gateway_resource.webhook.id
@@ -210,21 +210,22 @@ resource "aws_api_gateway_stage" "this" {
   rest_api_id   = aws_api_gateway_rest_api.this.id
   stage_name    = var.stage_name
 
-  access_log_settings {
-    destination_arn = aws_cloudwatch_log_group.api_gateway.arn
-    format = jsonencode({
-      requestId               = "$context.requestId",
-      sourceIp                = "$context.identity.sourceIp",
-      requestTime             = "$context.requestTime",
-      protocol                = "$context.protocol",
-      httpMethod              = "$context.httpMethod",
-      resourcePath            = "$context.resourcePath",
-      routeKey                = "$context.routeKey",
-      status                  = "$context.status",
-      responseLength          = "$context.responseLength",
-      integrationErrorMessage = "$context.integrationErrorMessage"
-    })
-  }
+  # ログ設定を無効化（CloudWatch Logs role ARNが設定されていないため）
+  # access_log_settings {
+  #   destination_arn = aws_cloudwatch_log_group.api_gateway.arn
+  #   format = jsonencode({
+  #     requestId               = "$context.requestId",
+  #     sourceIp                = "$context.identity.sourceIp",
+  #     requestTime             = "$context.requestTime",
+  #     protocol                = "$context.protocol",
+  #     httpMethod              = "$context.httpMethod",
+  #     resourcePath            = "$context.resourcePath",
+  #     routeKey                = "$context.routeKey",
+  #     status                  = "$context.status",
+  #     responseLength          = "$context.responseLength",
+  #     integrationErrorMessage = "$context.integrationErrorMessage"
+  #   })
+  # }
 
   xray_tracing_enabled = true
 
@@ -364,4 +365,50 @@ resource "aws_wafv2_web_acl_association" "this" {
   count        = var.enable_waf ? 1 : 0
   resource_arn = aws_api_gateway_stage.this.arn
   web_acl_arn  = aws_wafv2_web_acl.this[0].arn
+}
+
+# API Gateway カスタムドメイン名
+resource "aws_api_gateway_domain_name" "this" {
+  count                    = var.enable_custom_domain ? 1 : 0
+  domain_name              = var.domain_name
+  regional_certificate_arn = var.certificate_arn
+
+  endpoint_configuration {
+    types = ["REGIONAL"]
+  }
+
+  tags = merge(
+    {
+      Name = "${local.name_prefix}-domain"
+    },
+    var.tags
+  )
+}
+
+# API Gateway ベースパスマッピング
+resource "aws_api_gateway_base_path_mapping" "this" {
+  count       = var.enable_custom_domain ? 1 : 0
+  api_id      = aws_api_gateway_rest_api.this.id
+  stage_name  = aws_api_gateway_stage.this.stage_name
+  domain_name = aws_api_gateway_domain_name.this[0].domain_name
+}
+
+# Route53 レコード
+resource "aws_route53_record" "this" {
+  count   = var.enable_custom_domain ? 1 : 0
+  name    = aws_api_gateway_domain_name.this[0].domain_name
+  type    = "A"
+  zone_id = data.aws_route53_zone.this[0].zone_id
+
+  alias {
+    name                   = aws_api_gateway_domain_name.this[0].regional_domain_name
+    zone_id                = aws_api_gateway_domain_name.this[0].regional_zone_id
+    evaluate_target_health = false
+  }
+}
+
+# Route53 ホストゾーン
+data "aws_route53_zone" "this" {
+  count = var.enable_custom_domain ? 1 : 0
+  name  = join(".", slice(split(".", var.domain_name), length(split(".", var.domain_name)) - 2, length(split(".", var.domain_name))))
 }

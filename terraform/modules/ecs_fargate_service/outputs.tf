@@ -41,22 +41,22 @@ output "ecs_task_role_arn" {
 }
 
 output "alb_id" {
-  description = "ALBのID"
+  description = "NLBのID"
   value       = aws_lb.this.id
 }
 
 output "alb_arn" {
-  description = "ALBのARN"
+  description = "NLBのARN"
   value       = aws_lb.this.arn
 }
 
 output "alb_dns_name" {
-  description = "ALBのDNS名"
+  description = "NLBのDNS名"
   value       = aws_lb.this.dns_name
 }
 
 output "alb_zone_id" {
-  description = "ALBのゾーンID"
+  description = "NLBのゾーンID"
   value       = aws_lb.this.zone_id
 }
 
@@ -83,4 +83,14 @@ output "cloudwatch_log_group_name" {
 output "cloudwatch_log_group_arn" {
   description = "CloudWatch Logsグループのarn"
   value       = aws_cloudwatch_log_group.this.arn
+}
+
+output "http_listener_arn" {
+  description = "TCP リスナーのARN"
+  value       = aws_lb_listener.http.arn
+}
+
+output "https_listener_arn" {
+  description = "TLS リスナーのARN"
+  value       = var.alb_ssl_certificate_arn != "" ? aws_lb_listener.https[0].arn : null
 }

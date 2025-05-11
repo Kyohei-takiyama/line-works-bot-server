@@ -1,5 +1,50 @@
 # 開発環境のメイン定義
 
+# API Gateway用ACM証明書
+resource "aws_acm_certificate" "api" {
+  domain_name       = "api.${var.domain}"
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Name        = "${var.project}-${var.environment}-api-cert"
+    Environment = var.environment
+    Terraform   = "true"
+  }
+}
+
+# Route53ホストゾーン
+data "aws_route53_zone" "api" {
+  name = var.domain
+}
+
+# ACM証明書検証用DNSレコード
+resource "aws_route53_record" "api_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.api.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  name            = each.value.name
+  records         = [each.value.record]
+  ttl             = 60
+  type            = each.value.type
+  zone_id         = data.aws_route53_zone.api.zone_id
+}
+
+# ACM証明書の検証
+resource "aws_acm_certificate_validation" "api" {
+  certificate_arn         = aws_acm_certificate.api.arn
+  validation_record_fqdns = [for record in aws_route53_record.api_validation : record.fqdn]
+}
+
 # VPCモジュール
 module "vpc" {
   source = "../../modules/vpc"
@@ -198,20 +243,32 @@ module "api_gateway_webhook" {
   private_subnet_ids = module.vpc.private_subnet_ids
 
   alb_dns_name          = module.ecs_fargate_service.alb_dns_name
-  alb_listener_arn      = module.ecs_fargate_service.alb_arn
+  alb_listener_arn      = module.ecs_fargate_service.http_listener_arn
+  alb_arn               = module.ecs_fargate_service.alb_arn
   alb_security_group_id = module.ecs_fargate_service.alb_security_group_id
 
   webhook_path = "/callback"
   stage_name   = "v1"
 
+  # ログ設定を無効化
+  api_gateway_logging_level   = "OFF"
+  api_gateway_metrics_enabled = false
+
   enable_waf        = var.enable_waf
   enable_authorizer = var.enable_authorizer
   lw_api_bot_secret = var.lw_api_bot_secret
+
+  # カスタムドメイン設定
+  enable_custom_domain = true
+  domain_name          = "api.${var.domain}"
+  certificate_arn      = aws_acm_certificate.api.arn
 
   tags = {
     Environment = var.environment
     Terraform   = "true"
   }
+
+  depends_on = [aws_acm_certificate_validation.api]
 }
 
 # IAMモジュール（CI/CD用）
@@ -276,4 +333,14 @@ output "ci_cd_role_arn" {
 output "secrets_manager_arn" {
   description = "SecretsManagerのARN"
   value       = aws_secretsmanager_secret.line_works_bot.arn
+}
+
+output "api_gateway_custom_domain" {
+  description = "API Gatewayのカスタムドメイン名"
+  value       = module.api_gateway_webhook.custom_domain_name
+}
+
+output "api_gateway_custom_domain_url" {
+  description = "API Gatewayのカスタムドメインを使用した呼び出しURL"
+  value       = module.api_gateway_webhook.custom_domain_url
 }

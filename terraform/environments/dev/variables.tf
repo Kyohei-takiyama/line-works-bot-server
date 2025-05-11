@@ -106,6 +106,12 @@ variable "domain" {
   type        = string
 }
 
+variable "domain_name" {
+  description = "API Gatewayのカスタムドメイン名のベース部分"
+  type        = string
+  default     = ""
+}
+
 variable "secrets" {
   description = "SecretsManagerに保存する機密情報"
   type        = map(string)

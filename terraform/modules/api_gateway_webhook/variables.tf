@@ -30,6 +30,12 @@ variable "alb_listener_arn" {
   type        = string
 }
 
+variable "alb_arn" {
+  description = "ALBのARN"
+  type        = string
+}
+
+
 variable "alb_security_group_id" {
   description = "ALBセキュリティグループのID"
   type        = string
@@ -111,4 +117,22 @@ variable "api_gateway_throttling_burst_limit" {
   description = "API Gatewayのスロットリングバースト制限"
   type        = number
   default     = 2000
+}
+
+variable "domain_name" {
+  description = "API Gatewayのカスタムドメイン名"
+  type        = string
+  default     = ""
+}
+
+variable "certificate_arn" {
+  description = "API Gatewayのカスタムドメイン名に関連付けるACM証明書のARN"
+  type        = string
+  default     = ""
+}
+
+variable "enable_custom_domain" {
+  description = "カスタムドメイン名を有効にするかどうか"
+  type        = bool
+  default     = false
 }

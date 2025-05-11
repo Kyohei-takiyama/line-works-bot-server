@@ -49,7 +49,7 @@ resource "aws_ecs_task_definition" "this" {
 
 # ECSサービス
 resource "aws_ecs_service" "this" {
-  name                               = "${local.name_prefix}-service"
+  name                               = "${local.name_prefix}-service-new"
   cluster                            = aws_ecs_cluster.this.id
   task_definition                    = aws_ecs_task_definition.this.arn
   desired_count                      = var.desired_count
@@ -95,7 +95,7 @@ resource "aws_ecs_service" "this" {
     var.tags
   )
 
-  depends_on = [aws_lb_listener.https]
+  depends_on = [aws_lb_listener.http]
 }
 
 # ECSタスク用セキュリティグループ
@@ -104,13 +104,13 @@ resource "aws_security_group" "ecs_tasks" {
   description = "Security group for ECS tasks"
   vpc_id      = var.vpc_id
 
-  # コンテナポートへのインバウンドアクセスを許可（ALBからのみ）
+  # コンテナポートへのインバウンドアクセスを許可
   ingress {
-    from_port       = var.container_port
-    to_port         = var.container_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-    description     = "Allow inbound traffic from ALB"
+    from_port   = var.container_port
+    to_port     = var.container_port
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+    description = "Allow inbound traffic to container port"
   }
 
   # すべてのアウトバウンドトラフィックを許可
@@ -130,20 +130,18 @@ resource "aws_security_group" "ecs_tasks" {
   )
 }
 
-# ALB
+# NLB
 resource "aws_lb" "this" {
-  name               = "${local.name_prefix}-alb"
+  name               = "${local.name_prefix}-nlb"
   internal           = var.alb_internal
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
+  load_balancer_type = "network"
   subnets            = var.public_subnet_ids
 
   enable_deletion_protection = var.alb_deletion_protection
-  idle_timeout               = var.alb_idle_timeout
 
   tags = merge(
     {
-      Name = "${local.name_prefix}-alb"
+      Name = "${local.name_prefix}-nlb"
     },
     var.tags
   )
@@ -190,24 +188,21 @@ resource "aws_security_group" "alb" {
   )
 }
 
-# ALBターゲットグループ
+# NLBターゲットグループ
 resource "aws_lb_target_group" "this" {
   name        = "${local.name_prefix}-tg"
   port        = var.container_port
-  protocol    = "HTTP"
+  protocol    = "TCP"
   vpc_id      = var.vpc_id
   target_type = "ip"
 
   health_check {
     enabled             = true
     interval            = var.health_check_interval
-    path                = var.health_check_path
     port                = "traffic-port"
+    protocol            = "TCP"
     healthy_threshold   = var.health_check_healthy_threshold
     unhealthy_threshold = var.health_check_unhealthy_threshold
-    timeout             = var.health_check_timeout
-    protocol            = "HTTP"
-    matcher             = "200-299"
   }
 
   tags = merge(
@@ -222,35 +217,31 @@ resource "aws_lb_target_group" "this" {
   }
 }
 
-# ALB HTTPリスナー（HTTPSにリダイレクト）
+# NLB TCPリスナー
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.this.arn
   port              = 80
-  protocol          = "HTTP"
+  protocol          = "TCP"
 
   default_action {
-    type = "redirect"
-
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this.arn
   }
 
   tags = merge(
     {
-      Name = "${local.name_prefix}-http-listener"
+      Name = "${local.name_prefix}-tcp-listener"
     },
     var.tags
   )
 }
 
-# ALB HTTPSリスナー
+# NLB TLSリスナー
 resource "aws_lb_listener" "https" {
+  count             = var.alb_ssl_certificate_arn != "" ? 1 : 0
   load_balancer_arn = aws_lb.this.arn
   port              = 443
-  protocol          = "HTTPS"
+  protocol          = "TLS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = var.alb_ssl_certificate_arn
 
@@ -261,7 +252,7 @@ resource "aws_lb_listener" "https" {
 
   tags = merge(
     {
-      Name = "${local.name_prefix}-https-listener"
+      Name = "${local.name_prefix}-tls-listener"
     },
     var.tags
   )
@@ -275,6 +266,9 @@ resource "aws_appautoscaling_target" "this" {
   scalable_dimension = "ecs:service:DesiredCount"
   min_capacity       = var.min_capacity
   max_capacity       = var.max_capacity
+
+  # サービス名が変更された場合に再作成されるように依存関係を追加
+  depends_on = [aws_ecs_service.this]
 }
 
 # CPU使用率に基づくスケーリングポリシー
